@@ -1,28 +1,113 @@
 
 import os
-import asyncio
+import sqlite3
 from aiohttp import web
-from telegram import Update
+
+from telegram import (
+    Update,
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     ChatJoinRequestHandler,
     ChatMemberHandler,
-    ContextTypes,
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PORT = int(os.getenv("PORT", "10000"))
+DB_FILE = "bot_data.db"
 
-WELCOME_MESSAGE = os.getenv(
-    "WELCOME_MESSAGE",
-    "🎉 Welcome to My Cine Spot!\n\nEnjoy watching! ❤️"
+DEFAULT_WELCOME = (
+    "🎉✨ WELCOME TO MY CINE SPOT ✨🎉\n\n"
+    "👋 Welcome, Dear!\n\n"
+    "💖 H r u? Hope you're doing great!\n\n"
+    "🍿 Enjoy Your Time With My Cine Spot! ❤️"
 )
 
-channels = {}
-recent_join_requests = set()
+START_MESSAGE = (
+    "👋✨ WELCOME TO MY CINE SPOT BOT ✨\n\n"
+    "🎬 EVERY UPDATE AVAILABLE HERE!\n\n"
+    "🔥 Movies • Web Series • Latest Updates\n\n"
+    "📢 Don't Miss Any Updates!\n\n"
+    "👇 JOIN OUR OFFICIAL CHANNEL\n\n"
+    "🔗 https://whatsapp.com/channel/0029VbCN6zUFsn0b2goG6r2C\n\n"
+    "❤️ Stay Connected With My Cine Spot!"
+)
+
+recent_requests = set()
 web_runner = None
+
+
+# DATABASE
+def db():
+    return sqlite3.connect(DB_FILE)
+
+
+def init_db():
+    with db() as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                chat_id INTEGER PRIMARY KEY,
+                name TEXT,
+                joins INTEGER DEFAULT 0,
+                leaves INTEGER DEFAULT 0
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        con.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            ("welcome", DEFAULT_WELCOME)
+        )
+
+
+def get_welcome():
+    with db() as con:
+        row = con.execute(
+            "SELECT value FROM settings WHERE key='welcome'"
+        ).fetchone()
+        return row[0] if row else DEFAULT_WELCOME
+
+
+def save_welcome(message):
+    with db() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("welcome", message)
+        )
+
+
+def update_chat(chat):
+    with db() as con:
+        con.execute("""
+            INSERT INTO chats (chat_id, name)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id)
+            DO UPDATE SET name=excluded.name
+        """, (chat.id, chat.title or "Unknown"))
+
+
+def count_event(chat, event):
+    with db() as con:
+        con.execute(
+            f"UPDATE chats SET {event} = {event} + 1 WHERE chat_id=?",
+            (chat.id,)
+        )
+
+
+def get_chats():
+    with db() as con:
+        return con.execute(
+            "SELECT chat_id, name, joins, leaves FROM chats"
+        ).fetchall()
 
 
 def is_admin(user_id):
@@ -39,160 +124,13 @@ async def send_admin(context, message):
         print("Admin notification error:", e)
 
 
-async def send_welcome(context, user_id):
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=WELCOME_MESSAGE
-        )
-        return "✅ Sent"
-    except Exception as e:
-        print("Welcome message error:", e)
-        return "⚠️ Not Sent"
-
-
-def update_channel(chat):
-    chat_id = chat.id
-
-    if chat_id not in channels:
-        channels[chat_id] = {
-            "name": chat.title or "Unknown Channel",
-            "joins": 0,
-            "leaves": 0
-        }
-    else:
-        channels[chat_id]["name"] = (
-            chat.title or channels[chat_id]["name"]
-        )
-
-
 def user_details(user):
-    name = user.full_name or "Unknown"
     username = f"@{user.username}" if user.username else "No username"
-
     return (
-        f"Name: {name}\n"
+        f"Name: {user.full_name}\n"
         f"Username: {username}\n"
         f"User ID: {user.id}"
     )
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome to My Cine Spot Bot!\n\n"
-        "இந்த Bot-ல் Join Request தானாக Approve செய்யப்படும்.\n"
-        "Channel-ல் Join ஆனதும் Welcome Message அனுப்பப்படும்."
-    )
-
-
-async def setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if not is_admin(user.id):
-        return
-
-    global WELCOME_MESSAGE
-
-    message = " ".join(context.args).strip()
-
-    if not message:
-        await update.message.reply_text(
-            "❌ Usage:\n/setwelcome Your Welcome Message"
-        )
-        return
-
-    WELCOME_MESSAGE = message
-
-    await update.message.reply_text(
-        "✅ Welcome Message Updated Successfully!"
-    )
-
-
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    await update.message.reply_text(
-        f"📩 Current Welcome Message:\n\n{WELCOME_MESSAGE}"
-    )
-
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not channels:
-        await update.message.reply_text(
-            "இன்னும் எந்த Channel-லும் Bot activity இல்லை."
-        )
-        return
-
-    result = "📊 MY CINE SPOT - CHANNEL STATS\n\n"
-
-    for chat_id, data in channels.items():
-        try:
-            count = await context.bot.get_chat_member_count(chat_id)
-            member_count = str(count)
-        except Exception:
-            member_count = "Unavailable"
-
-        result += (
-            f"📢 {data['name']}\n"
-            f"🆔 {chat_id}\n"
-            f"👥 Current Members: {member_count}\n"
-            f"📥 Recorded Joins: {data['joins']}\n"
-            f"📤 Recorded Leaves: {data['leaves']}\n\n"
-        )
-
-    await update.message.reply_text(result)
-
-
-async def approve_request(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    request = update.chat_join_request
-    chat = request.chat
-    user = request.from_user
-
-    update_channel(chat)
-
-    key = (chat.id, user.id)
-    recent_join_requests.add(key)
-
-    try:
-        await context.bot.approve_chat_join_request(
-            chat_id=chat.id,
-            user_id=user.id
-        )
-    except Exception as e:
-        recent_join_requests.discard(key)
-        await send_admin(
-            context,
-            f"❌ JOIN APPROVAL FAILED\n\n"
-            f"Channel: {chat.title}\n"
-            f"User ID: {user.id}\n"
-            f"Error: {e}"
-        )
-        return
-
-    channels[chat.id]["joins"] += 1
-
-    welcome_status = await send_welcome(context, user.id)
-
-    bot = await context.bot.get_me()
-
-    message = (
-        "🔔 JOIN REQUEST\n\n"
-        f"Bot: @{bot.username}\n"
-        f"Channel: {chat.title}\n"
-        f"Channel ID: {chat.id}\n\n"
-        f"{user_details(user)}\n\n"
-        "Approval: ✅ Approved\n"
-        f"Welcome: {welcome_status}"
-    )
-
-    await send_admin(context, message)
 
 
 def is_member(member):
@@ -205,10 +143,119 @@ def is_member(member):
     )
 
 
-async def member_update(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# START COMMAND
+async def start(update, context):
+    await update.message.reply_text(START_MESSAGE)
+
+
+# SET WELCOME
+async def setwelcome(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+
+    message = update.message.text.partition(" ")[2].strip()
+
+    if not message:
+        await update.message.reply_text(
+            "❌ Usage:\n/setwelcome Your Welcome Message"
+        )
+        return
+
+    save_welcome(message)
+
+    await update.message.reply_text(
+        "✅ Welcome Message Updated Successfully!\n"
+        "இனி Group-ல் புதிய Member Join ஆனதும் இந்த Message வரும்."
+    )
+
+
+# VIEW WELCOME
+async def welcome(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+
+    await update.message.reply_text(
+        "📩 CURRENT WELCOME MESSAGE\n\n" + get_welcome()
+    )
+
+
+# STATS
+async def stats(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+
+    chats = get_chats()
+
+    if not chats:
+        await update.message.reply_text(
+            "இன்னும் எந்த Group / Channel activity-யும் இல்லை."
+        )
+        return
+
+    result = "📊 MY CINE SPOT - STATISTICS\n\n"
+
+    for chat_id, name, joins, leaves in chats:
+        try:
+            count = await context.bot.get_chat_member_count(chat_id)
+            members = str(count)
+        except Exception:
+            members = "Unavailable"
+
+        result += (
+            f"📢 {name}\n"
+            f"🆔 {chat_id}\n"
+            f"👥 Current Members: {members}\n"
+            f"📥 Recorded Joins: {joins}\n"
+            f"📤 Recorded Leaves: {leaves}\n\n"
+        )
+
+    await update.message.reply_text(result)
+
+
+# AUTO APPROVE JOIN REQUEST
+async def approve_request(update, context):
+    request = update.chat_join_request
+    chat = request.chat
+    user = request.from_user
+
+    update_chat(chat)
+    key = (chat.id, user.id)
+    recent_requests.add(key)
+
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=chat.id,
+            user_id=user.id
+        )
+    except Exception as e:
+        recent_requests.discard(key)
+        await send_admin(
+            context,
+            f"❌ JOIN APPROVAL FAILED\n\n"
+            f"Channel: {chat.title}\n"
+            f"User ID: {user.id}\n"
+            f"Error: {e}"
+        )
+        return
+
+    count_event(chat, "joins")
+
+    bot = await context.bot.get_me()
+
+    await send_admin(
+        context,
+        "🔔 JOIN REQUEST\n\n"
+        f"Bot: @{bot.username}\n"
+        f"Channel: {chat.title}\n"
+        f"Channel ID: {chat.id}\n\n"
+        f"{user_details(user)}\n\n"
+        "Approval: ✅ Approved\n"
+        "Welcome: Group Welcome applies when joining the Group"
+    )
+
+
+# GROUP / CHANNEL MEMBER UPDATES
+async def member_update(update, context):
     change = update.chat_member
 
     chat = change.chat
@@ -216,61 +263,86 @@ async def member_update(
     new_member = change.new_chat_member
     user = new_member.user
 
-    update_channel(chat)
+    if user.is_bot:
+        return
+
+    update_chat(chat)
 
     was_member = is_member(old_member)
     now_member = is_member(new_member)
 
     key = (chat.id, user.id)
 
-    # New member joined
     if not was_member and now_member:
 
-        # Join request handler already handled this member
-        if key in recent_join_requests:
-            recent_join_requests.discard(key)
+        if key in recent_requests:
+            recent_requests.discard(key)
             return
 
-        channels[chat.id]["joins"] += 1
+        count_event(chat, "joins")
 
-        welcome_status = await send_welcome(context, user.id)
+        # Group welcome message
+        if chat.type in ("group", "supergroup"):
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=get_welcome()
+                )
+                welcome_status = "✅ Sent in Group"
+            except Exception as e:
+                print("Group welcome error:", e)
+                welcome_status = "⚠️ Not Sent"
+        else:
+            welcome_status = "Channel member joined"
 
         bot = await context.bot.get_me()
 
-        message = (
+        await send_admin(
+            context,
             "🔔 NEW MEMBER JOINED\n\n"
             f"Bot: @{bot.username}\n"
-            f"Channel: {chat.title}\n"
-            f"Channel ID: {chat.id}\n\n"
+            f"Chat: {chat.title}\n"
+            f"Chat ID: {chat.id}\n\n"
             f"{user_details(user)}\n\n"
             "Status: ✅ Joined\n"
             f"Welcome: {welcome_status}"
         )
 
-        await send_admin(context, message)
-
-    # Member left or was removed
     elif was_member and not now_member:
 
-        channels[chat.id]["leaves"] += 1
+        count_event(chat, "leaves")
 
-        message = (
+        await send_admin(
+            context,
             "📤 MEMBER LEFT\n\n"
-            f"Channel: {chat.title}\n"
-            f"Channel ID: {chat.id}\n\n"
+            f"Chat: {chat.title}\n"
+            f"Chat ID: {chat.id}\n\n"
             f"{user_details(user)}\n\n"
             "Status: ❌ Left"
         )
 
-        await send_admin(context, message)
 
-
+# HEALTH SERVER
 async def health(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="My Cine Spot Bot is running!")
 
 
 async def post_init(application):
     global web_runner
+
+    # Public command menu
+    await application.bot.set_my_commands([
+        BotCommand("start", "Start My Cine Spot Bot")
+    ], scope=BotCommandScopeDefault())
+
+    # Admin-only command menu
+    if ADMIN_ID:
+        await application.bot.set_my_commands([
+            BotCommand("start", "Start My Cine Spot Bot"),
+            BotCommand("setwelcome", "Set Group Welcome Message"),
+            BotCommand("welcome", "View Welcome Message"),
+            BotCommand("stats", "View Channel / Group Statistics"),
+        ], scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
     app = web.Application()
     app.router.add_get("/", health)
@@ -284,8 +356,8 @@ async def post_init(application):
         "0.0.0.0",
         PORT
     )
-
     await site.start()
+
     print("Health server started")
 
 
@@ -296,9 +368,14 @@ async def post_shutdown(application):
         await web_runner.cleanup()
 
 
+# MAIN
 def main():
     if not BOT_TOKEN or not ADMIN_ID:
-        raise RuntimeError("BOT_TOKEN and ADMIN_ID are required")
+        raise RuntimeError(
+            "BOT_TOKEN and ADMIN_ID are required"
+        )
+
+    init_db()
 
     application = (
         Application.builder()
@@ -308,10 +385,18 @@ def main():
         .build()
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setwelcome", setwelcome))
-    application.add_handler(CommandHandler("welcome", welcome))
-    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(
+        CommandHandler("start", start)
+    )
+    application.add_handler(
+        CommandHandler("setwelcome", setwelcome)
+    )
+    application.add_handler(
+        CommandHandler("welcome", welcome)
+    )
+    application.add_handler(
+        CommandHandler("stats", stats)
+    )
 
     application.add_handler(
         ChatJoinRequestHandler(approve_request)
@@ -324,7 +409,7 @@ def main():
         )
     )
 
-    print("My Cine Spot Bot Started!")
+    print("MY CINE SPOT BOT STARTED!")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
@@ -333,4 +418,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
